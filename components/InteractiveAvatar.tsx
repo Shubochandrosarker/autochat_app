@@ -233,8 +233,24 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
 };
 
 function InteractiveAvatar() {
-  const { initAvatar, startAvatar, stopAvatar, sessionState, stream } =
+  const { initAvatar, startAvatar, stopAvatar, sessionState, stream, avatarRef } =
     useStreamingAvatarSession();
+
+  // CRITICAL (2026-10-09): bind the video element through the SDK (session.attach
+  // -> track.attach) so LiveKit adaptiveStream signals element visibility to the
+  // server. Setting only video.srcObject bypasses that signaling and the server
+  // pauses video layers after the first keyframe => static avatar with live audio.
+  const bindVideoElement = useCallback(
+    (element: HTMLVideoElement | null) => {
+      if (!element) return;
+      try {
+        (avatarRef.current as StreamingAvatarCompatType | null)?.attachElement?.(element);
+      } catch (e) {
+        console.warn("🎥 SDK attach failed; relying on raw stream", e);
+      }
+    },
+    [avatarRef],
+  );
 
   // Debug session state changes
   useEffect(() => {
@@ -274,12 +290,13 @@ function InteractiveAvatar() {
     if (element && stream) {
       console.log("🎥 Setting stream on newly attached video element");
       element.srcObject = stream;
+      bindVideoElement(element);
       element.onloadedmetadata = () => {
         console.log("🎥 Video metadata loaded, starting playback...");
         element.play();
       };
     }
-  }, [stream]);
+  }, [stream, bindVideoElement]);
   const { state: micState, request: requestMic } = useMicPermission();
   const isStoppingRef = useRef(false);
   const stopCallCountRef = useRef(0);
@@ -745,6 +762,7 @@ function InteractiveAvatar() {
     if (stream && mediaStream.current) {
       console.log("🎥 Setting video stream...");
       mediaStream.current.srcObject = stream;
+      bindVideoElement(mediaStream.current);
       mediaStream.current.onloadedmetadata = () => {
         console.log("🎥 Video metadata loaded, starting playback...");
         mediaStream.current!.play();
@@ -759,6 +777,7 @@ function InteractiveAvatar() {
         if (stream && mediaStream.current) {
           console.log("🎥 Retry: Setting video stream...");
           mediaStream.current.srcObject = stream;
+          bindVideoElement(mediaStream.current);
           mediaStream.current.onloadedmetadata = () => {
             console.log("🎥 Retry: Video metadata loaded, starting playback...");
             mediaStream.current!.play();
@@ -766,7 +785,7 @@ function InteractiveAvatar() {
         }
       }, 100);
     }
-  }, [mediaStream, stream, sessionState]);
+  }, [mediaStream, stream, sessionState, bindVideoElement]);
 
   // Monitor mic permission during active session - pause if mic gets disabled, auto-reconnect when enabled
   useEffect(() => {

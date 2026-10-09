@@ -224,6 +224,25 @@ export default class StreamingAvatarCompat {
     s.on(AgentEventsEnum.SESSION_STOPPED, onSessionStopped as (...a: unknown[]) => void);
   }
 
+  /**
+   * Attach the underlying LiveAvatar/LiveKit tracks to a media element.
+   * REQUIRED for video to actually animate: the SDK's LiveKit room runs with
+   * adaptiveStream enabled, which only requests video layers for tracks that
+   * are attached to a visible element (track.attach -> UpdateTrackSettings).
+   * Legacy code that only sets `video.srcObject = stream` bypasses that
+   * signaling -> server pauses video after the first keyframe (static avatar
+   * with working audio). Verified 2026-10-09.
+   */
+  attachElement(element: HTMLMediaElement): void {
+    try {
+      (
+        this.session as unknown as { attach: (el: HTMLMediaElement) => void }
+      ).attach(element);
+    } catch (e) {
+      console.warn("[liveavatar-compat] attachElement failed", e);
+    }
+  }
+
   private extractMediaStream(): MediaStream | null {
     try {
       const s = this.session as unknown as {
