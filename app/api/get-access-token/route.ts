@@ -15,6 +15,68 @@ import { NextResponse } from "next/server";
 
 const API_BASE = process.env.LIVEAVATAR_API_BASE ?? "https://api.liveavatar.com";
 
+// Server-side billing enforcement (2026-10-10): a LiveAvatar session is only
+// minted for a valid, non-expired purchase token. This is the authoritative
+// gate — the client-side checks are convenience only.
+const BILLING_API_BASE =
+  process.env.BILLING_API_BASE ?? "https://adhdtoolsdaily.com/wp-json/adhd/v1";
+const BILLING_API_BEARER = process.env.BILLING_API_BEARER ?? "";
+
+async function enforceBillingEntitlement(
+  token: string,
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  if (!BILLING_API_BEARER) {
+    return { ok: false, status: 500, error: "Billing is not configured." };
+  }
+  try {
+    const res = await fetch(`${BILLING_API_BASE}/verify_token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${BILLING_API_BEARER}`,
+      },
+      body: JSON.stringify({ token }),
+      cache: "no-store",
+    });
+    let data: {
+      success?: boolean;
+      valid?: boolean;
+      expired?: boolean;
+      message?: string;
+      error?: string;
+    } = {};
+    try {
+      data = JSON.parse(await res.text());
+    } catch {
+      data = {};
+    }
+    if (!res.ok || data?.success !== true || data?.valid !== true) {
+      return {
+        ok: false,
+        status: 403,
+        error:
+          data?.message ||
+          "Invalid purchase token. Please open the avatar from your purchase link.",
+      };
+    }
+    if (data?.expired === true) {
+      return {
+        ok: false,
+        status: 403,
+        error:
+          "Your session minutes are used up. Please purchase a new session to continue.",
+      };
+    }
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      error: "Could not validate your purchase. Please try again.",
+    };
+  }
+}
+
 export async function POST(request: Request) {
   const apiKey = process.env.LIVEAVATAR_API_KEY;
 
@@ -31,12 +93,29 @@ export async function POST(request: Request) {
     contextId?: string;
     maxSessionDuration?: number;
     language?: string;
+    token?: string;
   } = {};
   try {
     const text = await request.text();
     if (text) body = JSON.parse(text);
   } catch {
     body = {};
+  }
+
+  const purchaseToken = typeof body.token === "string" ? body.token.trim() : "";
+  if (!purchaseToken) {
+    return NextResponse.json(
+      { error: "Purchase token missing. Please open this page from your purchase link." },
+      { status: 401 },
+    );
+  }
+  const billing = await enforceBillingEntitlement(purchaseToken);
+  if (!billing.ok) {
+    console.error("[liveavatar] billing gate blocked session mint:", billing.error);
+    return NextResponse.json(
+      { error: billing.error },
+      { status: billing.status },
+    );
   }
 
   const avatarId =

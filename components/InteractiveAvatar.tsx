@@ -318,6 +318,7 @@ function InteractiveAvatar() {
         body: JSON.stringify({
           avatarId: config.avatarName,
           language: config.language,
+          token: tokenRef.current ?? clientToken ?? queryToken,
         }),
       });
       const token = await response.text();
@@ -339,9 +340,6 @@ function InteractiveAvatar() {
   }, []);
 
   const expireBillingToken = useCallback(async () => {
-    // TEMPORARY: Disabled for local testing
-    return;
-    /*
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
     if (!activeToken) {
       return;
@@ -358,7 +356,6 @@ function InteractiveAvatar() {
     } catch (error) {
       console.error("Failed to expire billing token:", error);
     }
-    */
   }, [clientToken, queryToken]);
 
   const handleTimeExpired = useCallback(async () => {
@@ -401,9 +398,6 @@ function InteractiveAvatar() {
 
   const setMinutes = useCallback(
     async (minutes: number) => {
-      // TEMPORARY: Disabled for local testing
-      return true;
-      /*
       const activeToken = tokenRef.current ?? clientToken ?? queryToken;
       if (!activeToken) {
         return false;
@@ -429,18 +423,12 @@ function InteractiveAvatar() {
         console.error("Set minutes error:", error);
         return false;
       }
-      */
     },
     [clientToken, queryToken],
   );
 
   const fetchMinutesRemaining = useCallback(
     async () => {
-      // TEMPORARY: Mocked for local testing
-      setMinutesRemaining(999);
-      setTotalAllocatedMinutes(999);
-      return 999;
-      /*
       const activeToken = tokenRef.current ?? clientToken ?? queryToken;
       if (!activeToken) {
         return null;
@@ -482,7 +470,6 @@ function InteractiveAvatar() {
         console.error("Minutes polling error:", error);
         return null;
       }
-      */
     },
     [clientToken, queryToken, handleTimeExpired],
   );
@@ -511,10 +498,6 @@ function InteractiveAvatar() {
   }, [fetchMinutesRemaining, setMinutes, stopMinutesPolling])
 
   const verifyBillingToken = useCallback(async () => {
-    // TEMPORARY: Bypassed for local testing
-    console.log("⚠️ Token verification BYPASSED for testing");
-    return true;
-    /*
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
     if (!activeToken) {
       setTokenError(
@@ -582,7 +565,6 @@ function InteractiveAvatar() {
     } finally {
       setIsVerifyingToken(false);
     }
-    */
   }, [clientToken, queryToken]);
 
   const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
