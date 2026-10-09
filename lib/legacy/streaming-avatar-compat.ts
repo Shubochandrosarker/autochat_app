@@ -207,19 +207,21 @@ export default class StreamingAvatarCompat {
       this.emit(StreamingEvents.AVATAR_END_MESSAGE);
     };
 
-    const onAny = s.on as (evt: string, cb: (...a: unknown[]) => void) => unknown;
-    onAny(SessionEvent.SESSION_STREAM_READY, onStreamReady);
-    onAny(SessionEvent.SESSION_DISCONNECTED, onDisconnected as (...a: unknown[]) => void);
-    onAny(SessionEvent.SESSION_CONNECTION_QUALITY_CHANGED, onQuality as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_SPEAK_STARTED, onUserSpeakStarted as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_SPEAK_ENDED, onUserSpeakEnded as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_SPEAK_STARTED, onAvatarSpeakStarted as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_SPEAK_ENDED, onAvatarSpeakEnded as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_TRANSCRIPTION, onUserTranscription as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_TRANSCRIPTION_CHUNK, onUserTranscriptionChunk as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_TRANSCRIPTION, onAvatarTranscription as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_TRANSCRIPTION_CHUNK, onAvatarTranscriptionChunk as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.SESSION_STOPPED, onSessionStopped as (...a: unknown[]) => void);
+    // NOTE: must call s.on(...) BOUND to the session — destructuring/detaching `.on`
+    // makes `this` undefined inside the SDK's EventEmitter (TypeError: Cannot read
+    // properties of undefined (reading '_events')). Verified 2026-10-09.
+    s.on(SessionEvent.SESSION_STREAM_READY, onStreamReady);
+    s.on(SessionEvent.SESSION_DISCONNECTED, onDisconnected as (...a: unknown[]) => void);
+    s.on(SessionEvent.SESSION_CONNECTION_QUALITY_CHANGED, onQuality as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_SPEAK_STARTED, onUserSpeakStarted as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_SPEAK_ENDED, onUserSpeakEnded as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_SPEAK_STARTED, onAvatarSpeakStarted as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_SPEAK_ENDED, onAvatarSpeakEnded as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_TRANSCRIPTION, onUserTranscription as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_TRANSCRIPTION_CHUNK, onUserTranscriptionChunk as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_TRANSCRIPTION, onAvatarTranscription as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_TRANSCRIPTION_CHUNK, onAvatarTranscriptionChunk as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.SESSION_STOPPED, onSessionStopped as (...a: unknown[]) => void);
   }
 
   private extractMediaStream(): MediaStream | null {
