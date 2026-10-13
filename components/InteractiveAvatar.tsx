@@ -233,8 +233,24 @@ const DEFAULT_CONFIG: StartAvatarRequest = {
 };
 
 function InteractiveAvatar() {
-  const { initAvatar, startAvatar, stopAvatar, sessionState, stream } =
+  const { initAvatar, startAvatar, stopAvatar, sessionState, stream, avatarRef } =
     useStreamingAvatarSession();
+
+  // CRITICAL (2026-10-09): bind the video element through the SDK (session.attach
+  // -> track.attach) so LiveKit adaptiveStream signals element visibility to the
+  // server. Setting only video.srcObject bypasses that signaling and the server
+  // pauses video layers after the first keyframe => static avatar with live audio.
+  const bindVideoElement = useCallback(
+    (element: HTMLVideoElement | null) => {
+      if (!element) return;
+      try {
+        (avatarRef.current as StreamingAvatarCompatType | null)?.attachElement?.(element);
+      } catch (e) {
+        console.warn("🎥 SDK attach failed; relying on raw stream", e);
+      }
+    },
+    [avatarRef],
+  );
 
   // Debug session state changes
   useEffect(() => {
@@ -274,12 +290,13 @@ function InteractiveAvatar() {
     if (element && stream) {
       console.log("🎥 Setting stream on newly attached video element");
       element.srcObject = stream;
+      bindVideoElement(element);
       element.onloadedmetadata = () => {
         console.log("🎥 Video metadata loaded, starting playback...");
         element.play();
       };
     }
-  }, [stream]);
+  }, [stream, bindVideoElement]);
   const { state: micState, request: requestMic } = useMicPermission();
   const isStoppingRef = useRef(false);
   const stopCallCountRef = useRef(0);
@@ -301,6 +318,7 @@ function InteractiveAvatar() {
         body: JSON.stringify({
           avatarId: config.avatarName,
           language: config.language,
+          token: tokenRef.current ?? clientToken ?? queryToken,
         }),
       });
       const token = await response.text();
@@ -322,9 +340,6 @@ function InteractiveAvatar() {
   }, []);
 
   const expireBillingToken = useCallback(async () => {
-    // TEMPORARY: Disabled for local testing
-    return;
-    /*
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
     if (!activeToken) {
       return;
@@ -341,7 +356,6 @@ function InteractiveAvatar() {
     } catch (error) {
       console.error("Failed to expire billing token:", error);
     }
-    */
   }, [clientToken, queryToken]);
 
   const handleTimeExpired = useCallback(async () => {
@@ -384,9 +398,6 @@ function InteractiveAvatar() {
 
   const setMinutes = useCallback(
     async (minutes: number) => {
-      // TEMPORARY: Disabled for local testing
-      return true;
-      /*
       const activeToken = tokenRef.current ?? clientToken ?? queryToken;
       if (!activeToken) {
         return false;
@@ -412,18 +423,12 @@ function InteractiveAvatar() {
         console.error("Set minutes error:", error);
         return false;
       }
-      */
     },
     [clientToken, queryToken],
   );
 
   const fetchMinutesRemaining = useCallback(
     async () => {
-      // TEMPORARY: Mocked for local testing
-      setMinutesRemaining(999);
-      setTotalAllocatedMinutes(999);
-      return 999;
-      /*
       const activeToken = tokenRef.current ?? clientToken ?? queryToken;
       if (!activeToken) {
         return null;
@@ -465,7 +470,6 @@ function InteractiveAvatar() {
         console.error("Minutes polling error:", error);
         return null;
       }
-      */
     },
     [clientToken, queryToken, handleTimeExpired],
   );
@@ -494,10 +498,6 @@ function InteractiveAvatar() {
   }, [fetchMinutesRemaining, setMinutes, stopMinutesPolling])
 
   const verifyBillingToken = useCallback(async () => {
-    // TEMPORARY: Bypassed for local testing
-    console.log("⚠️ Token verification BYPASSED for testing");
-    return true;
-    /*
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
     if (!activeToken) {
       setTokenError(
@@ -565,7 +565,6 @@ function InteractiveAvatar() {
     } finally {
       setIsVerifyingToken(false);
     }
-    */
   }, [clientToken, queryToken]);
 
   const startSessionV2 = useMemoizedFn(async (isVoiceChat: boolean) => {
@@ -745,6 +744,7 @@ function InteractiveAvatar() {
     if (stream && mediaStream.current) {
       console.log("🎥 Setting video stream...");
       mediaStream.current.srcObject = stream;
+      bindVideoElement(mediaStream.current);
       mediaStream.current.onloadedmetadata = () => {
         console.log("🎥 Video metadata loaded, starting playback...");
         mediaStream.current!.play();
@@ -759,6 +759,7 @@ function InteractiveAvatar() {
         if (stream && mediaStream.current) {
           console.log("🎥 Retry: Setting video stream...");
           mediaStream.current.srcObject = stream;
+          bindVideoElement(mediaStream.current);
           mediaStream.current.onloadedmetadata = () => {
             console.log("🎥 Retry: Video metadata loaded, starting playback...");
             mediaStream.current!.play();
@@ -766,7 +767,7 @@ function InteractiveAvatar() {
         }
       }, 100);
     }
-  }, [mediaStream, stream, sessionState]);
+  }, [mediaStream, stream, sessionState, bindVideoElement]);
 
   // Monitor mic permission during active session - pause if mic gets disabled, auto-reconnect when enabled
   useEffect(() => {

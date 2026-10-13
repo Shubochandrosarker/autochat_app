@@ -207,19 +207,40 @@ export default class StreamingAvatarCompat {
       this.emit(StreamingEvents.AVATAR_END_MESSAGE);
     };
 
-    const onAny = s.on as (evt: string, cb: (...a: unknown[]) => void) => unknown;
-    onAny(SessionEvent.SESSION_STREAM_READY, onStreamReady);
-    onAny(SessionEvent.SESSION_DISCONNECTED, onDisconnected as (...a: unknown[]) => void);
-    onAny(SessionEvent.SESSION_CONNECTION_QUALITY_CHANGED, onQuality as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_SPEAK_STARTED, onUserSpeakStarted as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_SPEAK_ENDED, onUserSpeakEnded as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_SPEAK_STARTED, onAvatarSpeakStarted as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_SPEAK_ENDED, onAvatarSpeakEnded as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_TRANSCRIPTION, onUserTranscription as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.USER_TRANSCRIPTION_CHUNK, onUserTranscriptionChunk as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_TRANSCRIPTION, onAvatarTranscription as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.AVATAR_TRANSCRIPTION_CHUNK, onAvatarTranscriptionChunk as (...a: unknown[]) => void);
-    onAny(AgentEventsEnum.SESSION_STOPPED, onSessionStopped as (...a: unknown[]) => void);
+    // NOTE: must call s.on(...) BOUND to the session — destructuring/detaching `.on`
+    // makes `this` undefined inside the SDK's EventEmitter (TypeError: Cannot read
+    // properties of undefined (reading '_events')). Verified 2026-10-09.
+    s.on(SessionEvent.SESSION_STREAM_READY, onStreamReady);
+    s.on(SessionEvent.SESSION_DISCONNECTED, onDisconnected as (...a: unknown[]) => void);
+    s.on(SessionEvent.SESSION_CONNECTION_QUALITY_CHANGED, onQuality as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_SPEAK_STARTED, onUserSpeakStarted as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_SPEAK_ENDED, onUserSpeakEnded as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_SPEAK_STARTED, onAvatarSpeakStarted as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_SPEAK_ENDED, onAvatarSpeakEnded as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_TRANSCRIPTION, onUserTranscription as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.USER_TRANSCRIPTION_CHUNK, onUserTranscriptionChunk as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_TRANSCRIPTION, onAvatarTranscription as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.AVATAR_TRANSCRIPTION_CHUNK, onAvatarTranscriptionChunk as (...a: unknown[]) => void);
+    s.on(AgentEventsEnum.SESSION_STOPPED, onSessionStopped as (...a: unknown[]) => void);
+  }
+
+  /**
+   * Attach the underlying LiveAvatar/LiveKit tracks to a media element.
+   * REQUIRED for video to actually animate: the SDK's LiveKit room runs with
+   * adaptiveStream enabled, which only requests video layers for tracks that
+   * are attached to a visible element (track.attach -> UpdateTrackSettings).
+   * Legacy code that only sets `video.srcObject = stream` bypasses that
+   * signaling -> server pauses video after the first keyframe (static avatar
+   * with working audio). Verified 2026-10-09.
+   */
+  attachElement(element: HTMLMediaElement): void {
+    try {
+      (
+        this.session as unknown as { attach: (el: HTMLMediaElement) => void }
+      ).attach(element);
+    } catch (e) {
+      console.warn("[liveavatar-compat] attachElement failed", e);
+    }
   }
 
   private extractMediaStream(): MediaStream | null {
