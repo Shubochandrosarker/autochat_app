@@ -1,58 +1,42 @@
-# Project Setup Guide (From Zip File)
+# Production-aware setup guide
 
-Follow this step-by-step guide to run the project.
+## Install
 
-## Step 1: Install Node.js (Required)
-You need **Node.js** installed on your computer to run this application.
+Use Node.js 20 LTS or newer, then run `npm ci` from the repository root.
 
-1.  **Download Node.js**:
-    *   Go to the official website: [https://nodejs.org/](https://nodejs.org/)
-    *   Download the **LTS (Long Term Support)** version (Recommended).
-    *   Run the installer and follow the on-screen instructions (accept defaults).
-2.  **Verify Installation**:
-    *   Open your terminal (Command Prompt, PowerShell, or Terminal).
-    *   Type `node -v` and press Enter. You should see a version number (e.g., `v20.x.x`).
-    *   Type `npm -v` and press Enter. You should see a version number.
+## Environment variables
 
-## Step 2: Extract and Open the Project
-1.  **Unzip the file**: Right-click the `.zip` file you received and extract it to a folder on your computer.
-2.  **Open in Terminal**:a
-    *   Open your terminal.
-    *   Navigate to the extracted folder using the `cd` command.
-    *   *Example (Windows):* `cd C:\Users\YourName\Downloads\autochat_app`
-    *   *Example (Mac):* `cd ~/Downloads/autochat_app`
+Set these in Vercel for Development, Preview, and Production as appropriate:
 
-## Step 3: Install Dependencies
-Since the project does not include the heavy `node_modules` folder, you must download the libraries first.
+```env
+LIVEAVATAR_API_KEY=your_liveavatar_api_key
+LIVEAVATAR_AVATAR_ID=513fd1b7-7ef9-466d-9af2-344e51eeb833
+BILLING_API_BASE=https://adhdtoolsdaily.com/wp-json/adhd/v1
+BILLING_API_BEARER=your_server_to_server_bearer
+```
 
-1.  In your terminal (inside the project folder), run:
-    ```bash
-    npm install
-    ```
-2.  Wait for the process to complete. It may take a few minutes.
+The API key and bearer are server-only secrets. Do not place them in the
+browser bundle, source code, screenshots, or Git history.
 
-## Step 4: Configure API Key
-1.  Inside the project folder, look for a file named `.env.local`.
-    *   *If it doesn't exist, create a new file named `.env.local`.*
-2.  Open `.env.local` with any text editor (Notepad, VS Code, TextEdit).
-3.  Paste the following into it:
-    ```env
-    HEYGEN_API_KEY=your_actual_heygen_api_key_here
-    NEXT_PUBLIC_BASE_API_URL=https://api.heygen.com
-    ```
-4.  **Crucial:** Replace `your_actual_heygen_api_key_here` with your real HeyGen Enterprise API Key.
+## Test locally
 
-## Step 5: Run the App
-1.  Start the local server by running:
-    ```bash
-    npm run dev
-    ```
-2.  You should behold a message like `Ready in x.xs` and `Local: http://localhost:3000`.
+Run `npm run dev`, then open:
 
-## Step 6: Use the App
-1.  Open your web browser (Chrome is recommended).
-2.  Go to: **[http://localhost:3000](http://localhost:3000)**
-3.  Click "Start Session" to interact with the avatar.
+`http://localhost:3000/embed?token=PURCHASE_TOKEN`
 
----
-**Note:** You do NOT need a purchase token locally right now; just click Start.
+Use a real purchase token only for an authorized test. The app verifies it
+through WordPress, starts LiveAvatar, and records an active ledger session.
+Heartbeats charge elapsed seconds on the server. Session end, timeout, and
+exhaustion close the ledger entry.
+
+## Release checks
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+```
+
+The repository is deployed by Vercel's existing Git connection after a direct
+push to the configured production branch. GitHub Actions are intentionally not
+used for this project.

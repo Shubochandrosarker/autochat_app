@@ -1,105 +1,49 @@
 /**
- * LiveAvatar backend: mint session tokens via the official LiveAvatar API.
- *
- * POST /api/get-access-token
- * Body (optional): { avatarId?: string, contextId?: string, maxSessionDuration?: number }
- *
- * Env required:
- *   LIVEAVATAR_API_KEY  – API key from app.liveavatar.com/developers
- *   LIVEAVATAR_AVATAR_ID (optional fallback) – default avatar when none passed
- *
- * Returns the session token as plain text (legacy contract of this endpoint),
- * with X-LiveAvatar-Session-Id header carrying the session id.
+ * Mint a LiveAvatar session token only after the WordPress purchase token is
+ * verified, then open the server-side billing session ledger.
  */
 import { NextResponse } from "next/server";
 
-const API_BASE = process.env.LIVEAVATAR_API_BASE ?? "https://api.liveavatar.com";
+import { billingRequest } from "../billing/utils";
 
-// Server-side billing enforcement (2026-10-10): a LiveAvatar session is only
-// minted for a valid, non-expired purchase token. This is the authoritative
-// gate — the client-side checks are convenience only.
-const BILLING_API_BASE =
-  process.env.BILLING_API_BASE ?? "https://adhdtoolsdaily.com/wp-json/adhd/v1";
-const BILLING_API_BEARER = process.env.BILLING_API_BEARER ?? "";
+const API_BASE = (
+  process.env.LIVEAVATAR_API_BASE ?? "https://api.liveavatar.com"
+).replace(/\/$/, "");
+const DEFAULT_AVATARS = [
+  "513fd1b7-7ef9-466d-9af2-344e51eeb833",
+  "e9844e6d-847e-4964-a92b-7ecd066f69df",
+];
 
-async function enforceBillingEntitlement(
-  token: string,
-): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
-  if (!BILLING_API_BEARER) {
-    return { ok: false, status: 500, error: "Billing is not configured." };
-  }
-  try {
-    const res = await fetch(`${BILLING_API_BASE}/verify_token`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${BILLING_API_BEARER}`,
-      },
-      body: JSON.stringify({ token }),
-      cache: "no-store",
-    });
-    let data: {
-      success?: boolean;
-      valid?: boolean;
-      expired?: boolean;
-      message?: string;
-      error?: string;
-    } = {};
-    try {
-      data = JSON.parse(await res.text());
-    } catch {
-      data = {};
-    }
-    if (!res.ok || data?.success !== true || data?.valid !== true) {
-      return {
-        ok: false,
-        status: 403,
-        error:
-          data?.message ||
-          "Invalid purchase token. Please open the avatar from your purchase link.",
-      };
-    }
-    if (data?.expired === true) {
-      return {
-        ok: false,
-        status: 403,
-        error:
-          "Your session minutes are used up. Please purchase a new session to continue.",
-      };
-    }
-    return { ok: true };
-  } catch {
-    return {
-      ok: false,
-      status: 502,
-      error: "Could not validate your purchase. Please try again.",
-    };
-  }
+type RequestBody = {
+  avatarId?: string;
+  contextId?: string;
+  maxSessionDuration?: number;
+  language?: string;
+  token?: string;
+  clientSessionId?: string;
+};
+
+function safeErrorMessage(data: Record<string, unknown>, fallback: string) {
+  return typeof data.message === "string" && data.message
+    ? data.message
+    : fallback;
 }
 
 export async function POST(request: Request) {
-  const apiKey = process.env.LIVEAVATAR_API_KEY;
-
+  const apiKey = process.env.LIVEAVATAR_API_KEY?.trim();
   if (!apiKey) {
-    console.error("[liveavatar] LIVEAVATAR_API_KEY missing");
     return NextResponse.json(
       { error: "LiveAvatar API key is not configured." },
       { status: 500 },
     );
   }
 
-  let body: {
-    avatarId?: string;
-    contextId?: string;
-    maxSessionDuration?: number;
-    language?: string;
-    token?: string;
-  } = {};
+  let body: RequestBody = {};
   try {
-    const text = await request.text();
-    if (text) body = JSON.parse(text);
+    const parsed = await request.json();
+    if (parsed && typeof parsed === "object") body = parsed as RequestBody;
   } catch {
-    body = {};
+    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
   const purchaseToken = typeof body.token === "string" ? body.token.trim() : "";
@@ -109,124 +53,149 @@ export async function POST(request: Request) {
       { status: 401 },
     );
   }
-  const billing = await enforceBillingEntitlement(purchaseToken);
-  if (!billing.ok) {
-    console.error("[liveavatar] billing gate blocked session mint:", billing.error);
+
+  const entitlement = await billingRequest({
+    endpoint: "/verify_token",
+    payload: { token: purchaseToken },
+  });
+  if (
+    !entitlement.ok ||
+    entitlement.data.success !== true ||
+    entitlement.data.valid !== true ||
+    entitlement.data.expired === true
+  ) {
     return NextResponse.json(
-      { error: billing.error },
-      { status: billing.status },
+      {
+        error:
+          entitlement.error ??
+          "Invalid purchase token. Please open the avatar from your purchase link.",
+      },
+      { status: entitlement.status === 500 ? 500 : 403 },
     );
   }
 
-  const avatarId =
-    body.avatarId ||
-    (process.env.LIVEAVATAR_AVATAR_ID || undefined);
-
-  if (!avatarId) {
-    return NextResponse.json(
-      { error: "avatarId is required (no LIVEAVATAR_AVATAR_ID fallback set)." },
-      { status: 400 },
-    );
+  const configuredAvatar = process.env.LIVEAVATAR_AVATAR_ID?.trim();
+  const avatarId = (body.avatarId?.trim() || configuredAvatar || DEFAULT_AVATARS[0]);
+  const allowedAvatarIds = new Set(
+    [configuredAvatar, ...DEFAULT_AVATARS].filter(Boolean),
+  );
+  if (!allowedAvatarIds.has(avatarId)) {
+    return NextResponse.json({ error: "Unsupported avatar selection." }, { status: 400 });
   }
 
   const payload: Record<string, unknown> = {
     mode: "FULL",
     avatar_id: avatarId,
+    max_session_duration:
+      typeof body.maxSessionDuration === "number" &&
+      body.maxSessionDuration > 0 &&
+      body.maxSessionDuration <= 300
+        ? Math.floor(body.maxSessionDuration)
+        : 300,
   };
-  if (body.contextId) payload.context_id = body.contextId;
-  // 30-minute cap requested, but LiveAvatar API caps max_session_duration at 300s per token.
-  payload.max_session_duration =
-    body.maxSessionDuration &&
-    body.maxSessionDuration > 0 &&
-    body.maxSessionDuration <= 300
-      ? body.maxSessionDuration
-      : 300;
+  if (body.contextId?.trim()) payload.context_id = body.contextId.trim();
 
-  // FULL mode now REQUIRES exactly one of voice_agent | avatar_persona.
-  // Use the avatar's default voice agent (set per-avatar in LiveAvatar dashboard).
   try {
-    const avRes = await fetch(`${API_BASE}/v1/avatars/${avatarId}`, {
+    const avatarResponse = await fetch(`${API_BASE}/v1/avatars/${avatarId}`, {
       headers: { "X-API-KEY": apiKey },
+      cache: "no-store",
     });
-    const avRaw = await avRes.text();
-    let av: {
+    const avatarRaw = await avatarResponse.text();
+    let avatarData: {
       data?: { default_voice_agent_id?: string | null } | null;
     } = {};
     try {
-      av = JSON.parse(avRaw);
+      avatarData = JSON.parse(avatarRaw);
     } catch {
-      av = {};
+      avatarData = {};
     }
-    const agentId = av?.data?.default_voice_agent_id;
-    if (!agentId) {
-      console.error("[liveavatar] avatar has no default_voice_agent_id", avRes.status, avRaw.slice(0, 300));
+
+    if (!avatarResponse.ok) {
       return NextResponse.json(
-        {
-          error:
-            "Avatar has no default voice agent configured. Set one in the LiveAvatar dashboard for this avatar.",
-        },
+        { error: "Could not load the selected LiveAvatar." },
+        { status: 502 },
+      );
+    }
+
+    const agentId = avatarData.data?.default_voice_agent_id;
+    if (!agentId) {
+      return NextResponse.json(
+        { error: "The selected avatar has no default voice agent configured." },
         { status: 502 },
       );
     }
     payload.voice_agent = { id: agentId };
-  } catch (e) {
-    console.error("[liveavatar] avatar lookup failed:", e);
-    return NextResponse.json(
-      { error: "Failed to look up avatar voice agent" },
-      { status: 502 },
-    );
-  }
 
-  try {
-    const res = await fetch(`${API_BASE}/v1/sessions/token`, {
+    const tokenResponse = await fetch(`${API_BASE}/v1/sessions/token`, {
       method: "POST",
       headers: {
         "X-API-KEY": apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      cache: "no-store",
     });
-
-    const raw = await res.text();
-    let parsed: {
-      code?: number;
+    const raw = await tokenResponse.text();
+    let tokenData: {
       data?: { session_id?: string; session_token?: string };
       message?: string;
     } = {};
     try {
-      parsed = JSON.parse(raw);
+      tokenData = JSON.parse(raw);
     } catch {
-      parsed = {};
+      tokenData = {};
     }
 
-    if (!res.ok || !parsed?.data?.session_token) {
-      console.error(
-        "[liveavatar] session token failed",
-        res.status,
-        raw.slice(0, 500),
-      );
+    const providerSessionId = tokenData.data?.session_id?.trim();
+    const providerSessionToken = tokenData.data?.session_token?.trim();
+    if (!tokenResponse.ok || !providerSessionId || !providerSessionToken) {
       return NextResponse.json(
         {
-          error:
-            parsed?.message ||
-            `LiveAvatar rejected the session request (HTTP ${res.status}).`,
+          error: safeErrorMessage(
+            tokenData as Record<string, unknown>,
+            `LiveAvatar rejected the session request (HTTP ${tokenResponse.status}).`,
+          ),
         },
         { status: 502 },
       );
     }
 
-    return new NextResponse(parsed.data.session_token, {
+    const billingSession = await billingRequest({
+      endpoint: "/session_start",
+      payload: {
+        token: purchaseToken,
+        provider_session_id: providerSessionId,
+        client_session_id:
+          typeof body.clientSessionId === "string"
+            ? body.clientSessionId.trim().slice(0, 64)
+            : "",
+      },
+    });
+    const billingSessionId = billingSession.data.session_id;
+    if (
+      !billingSession.ok ||
+      typeof billingSessionId !== "string" ||
+      !billingSessionId
+    ) {
+      return NextResponse.json(
+        { error: billingSession.error ?? "Could not start the billing session." },
+        { status: billingSession.status === 409 ? 409 : 502 },
+      );
+    }
+
+    return new NextResponse(providerSessionToken, {
       status: 200,
       headers: {
         "Content-Type": "text/plain",
-        "X-LiveAvatar-Session-Id": parsed.data.session_id ?? "",
+        "Cache-Control": "no-store",
+        "X-LiveAvatar-Session-Id": providerSessionId,
+        "X-ADHD-Billing-Session-Id": billingSessionId,
       },
     });
-  } catch (error) {
-    console.error("[liveavatar] token fetch error:", error);
+  } catch {
     return NextResponse.json(
-      { error: "Failed to retrieve LiveAvatar session token" },
-      { status: 500 },
+      { error: "Failed to retrieve the LiveAvatar session token." },
+      { status: 502 },
     );
   }
 }
