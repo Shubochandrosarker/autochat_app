@@ -1,8 +1,89 @@
 import { NextResponse } from "next/server";
 
-const BILLING_API_BASE =
-  process.env.BILLING_API_BASE ?? "https://adhdtoolsdaily.com/wp-json/adhd/v1";
-const BILLING_API_BEARER = process.env.BILLING_API_BEARER ?? "REDACTED_REFERENCE_ONLY_ROTATE_BEFORE_DEPLOY";
+const BILLING_API_BASE = (
+  process.env.BILLING_API_BASE ??
+  "https://adhdtoolsdaily.com/wp-json/adhd/v1"
+).replace(/\/$/, "");
+const BILLING_API_BEARER = process.env.BILLING_API_BEARER?.trim();
+
+export type BillingResponse = {
+  ok: boolean;
+  status: number;
+  data: Record<string, unknown>;
+  error?: string;
+};
+
+function getBillingError(data: Record<string, unknown>, status: number) {
+  const nested = data.data;
+  if (nested && typeof nested === "object" && "message" in nested) {
+    const message = (nested as { message?: unknown }).message;
+    if (typeof message === "string" && message) return message;
+  }
+
+  for (const value of [data.message, data.error]) {
+    if (typeof value === "string" && value) return value;
+  }
+
+  return `Billing service returned HTTP ${status}.`;
+}
+
+export async function billingRequest({
+  endpoint,
+  payload,
+}: {
+  endpoint: string;
+  payload: Record<string, unknown>;
+}): Promise<BillingResponse> {
+  if (!BILLING_API_BEARER) {
+    return {
+      ok: false,
+      status: 500,
+      data: {},
+      error: "Billing is not configured.",
+    };
+  }
+
+  try {
+    const response = await fetch(`${BILLING_API_BASE}${endpoint}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${BILLING_API_BEARER}`,
+      },
+      body: JSON.stringify(payload),
+      cache: "no-store",
+    });
+
+    const responseText = await response.text();
+    let data: Record<string, unknown> = {};
+    try {
+      const parsed = responseText ? JSON.parse(responseText) : {};
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        data = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Keep provider response details out of the client when WordPress does
+      // not return JSON.
+    }
+
+    const hasApplicationError = data.success === false || Boolean(data.error);
+    return {
+      ok: response.ok && !hasApplicationError,
+      status: response.status || 502,
+      data,
+      ...(response.ok && !hasApplicationError
+        ? {}
+        : { error: getBillingError(data, response.status || 502) }),
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 502,
+      data: {},
+      error: "Could not reach the billing service.",
+    };
+  }
+}
 
 export async function forwardBillingRequest({
   endpoint,
@@ -11,56 +92,14 @@ export async function forwardBillingRequest({
   endpoint: string;
   payload: Record<string, unknown>;
 }) {
-  const bearerToken = BILLING_API_BEARER;
+  const result = await billingRequest({ endpoint, payload });
 
-  const res = await fetch(`${BILLING_API_BASE}${endpoint}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${bearerToken}`,
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-
-  const text = await res.text();
-  let data: any = {};
-
-  try {
-    if (text) {
-      // Try to parse as JSON
-      data = JSON.parse(text);
-    } else {
-      data = {};
-    }
-  } catch {
-    // If parsing fails, check if it's a boolean string or other value
-    const trimmed = text.trim().toLowerCase();
-    if (trimmed === "true") {
-      data = true;
-    } else if (trimmed === "false") {
-      data = false;
-    } else {
-      data = { raw: text };
-    }
-  }
-
-  // Handle WordPress errors
-  if (!res.ok || (data.success === false || data.error)) {
-    const errorMessage = data.message || data.error || data.data?.message || "An error occurred";
-    console.error(`[Billing API] ${endpoint} - Error:`, errorMessage);
+  if (!result.ok) {
     return NextResponse.json(
-      { 
-        success: false,
-        error: errorMessage,
-        ...data 
-      },
-      { status: res.status || 500 }
+      { success: false, error: result.error ?? "Billing request failed." },
+      { status: result.status },
     );
   }
 
-  // Log for debugging (remove in production if needed)
-  console.log(`[Billing API] ${endpoint} - Status: ${res.status}, Response:`, data);
-
-  return NextResponse.json(data, { status: res.status });
+  return NextResponse.json(result.data, { status: result.status });
 }

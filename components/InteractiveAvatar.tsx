@@ -215,6 +215,13 @@ After responding, gently bridge back to your role:
 * **[Empathy First]:** Always validate before giving advice.`;
 }
 
+function createClientSessionId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 const DEFAULT_CONFIG: StartAvatarRequest = {
   quality: AvatarQuality.High,
   avatarName: AVATARS[0].avatar_id,
@@ -279,6 +286,10 @@ function InteractiveAvatar() {
   const minutesRemainingRef = useRef<number | null>(null);
   const hasExpiredRef = useRef(false);
   const tokenRef = useRef<string | null>(null);
+  const billingSessionIdRef = useRef<string | null>(null);
+  const clientSessionIdRef = useRef(createClientSessionId());
+  const billingHeartbeatInFlightRef = useRef(false);
+  const billingEndPromiseRef = useRef<Promise<void> | null>(null);
   const queryToken = searchParams?.get("token") ?? null;
 
   // Callback to ensure video element is properly attached
@@ -310,26 +321,43 @@ function InteractiveAvatar() {
     }
   }, [queryToken, clientToken]);
 
+  useEffect(() => {
+    if (!queryToken || typeof window === "undefined") return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("token");
+    window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+  }, [queryToken]);
+
   async function fetchAccessToken() {
-    try {
-      const response = await fetch("/api/get-access-token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          avatarId: config.avatarName,
-          language: config.language,
-          token: tokenRef.current ?? clientToken ?? queryToken,
-        }),
-      });
-      const token = await response.text();
-
-      console.log("Access Token:", token); // Log the token to verify
-
-      return token;
-    } catch (error) {
-      console.error("Error fetching access token:", error);
-      throw error;
+    const response = await fetch("/api/get-access-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        avatarId: config.avatarName,
+        language: config.language,
+        token: tokenRef.current ?? clientToken ?? queryToken,
+        clientSessionId: clientSessionIdRef.current,
+      }),
+      cache: "no-store",
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      let message = "Unable to start the avatar session.";
+      try {
+        const data = JSON.parse(responseText) as { error?: unknown };
+        if (typeof data.error === "string" && data.error) message = data.error;
+      } catch {
+        // Keep the provider response out of the browser console.
+      }
+      throw new Error(message);
     }
+
+    const billingSessionId = response.headers.get("X-ADHD-Billing-Session-Id");
+    if (!billingSessionId || !responseText.trim()) {
+      throw new Error("The billing session could not be started.");
+    }
+    billingSessionIdRef.current = billingSessionId;
+    return responseText.trim();
   }
 
   const stopMinutesPolling = useCallback(() => {
@@ -338,6 +366,30 @@ function InteractiveAvatar() {
       minutesPollingRef.current = null;
     }
   }, []);
+
+  const endBillingSession = useCallback(async () => {
+    if (billingEndPromiseRef.current) return billingEndPromiseRef.current;
+
+    const activeToken = tokenRef.current ?? clientToken ?? queryToken;
+    const sessionId = billingSessionIdRef.current;
+    if (!activeToken || !sessionId) return;
+
+    const request = fetch("/api/billing/session/end", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: activeToken, session_id: sessionId }),
+      keepalive: true,
+    })
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        billingSessionIdRef.current = null;
+        billingEndPromiseRef.current = null;
+      });
+
+    billingEndPromiseRef.current = request;
+    return request;
+  }, [clientToken, queryToken]);
 
   const expireBillingToken = useCallback(async () => {
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
@@ -371,12 +423,13 @@ function InteractiveAvatar() {
     } catch (error) {
       console.error("Failed to expire token after timeout:", error);
     }
+    await endBillingSession();
     try {
       await stopAvatar();
     } catch (error) {
       console.error("Failed to stop avatar after timeout:", error);
     }
-  }, [expireBillingToken, stopAvatar, stopMinutesPolling]);
+  }, [endBillingSession, expireBillingToken, stopAvatar, stopMinutesPolling]);
 
   const parseMinutesValue = (data: any) => {
     // New format: remaining_minutes
@@ -396,36 +449,59 @@ function InteractiveAvatar() {
     return null;
   };
 
-  const setMinutes = useCallback(
-    async (minutes: number) => {
-      const activeToken = tokenRef.current ?? clientToken ?? queryToken;
-      if (!activeToken) {
-        return false;
+  const heartbeatBillingSession = useCallback(async () => {
+    const activeToken = tokenRef.current ?? clientToken ?? queryToken;
+    const sessionId = billingSessionIdRef.current;
+    if (!activeToken || !sessionId || billingHeartbeatInFlightRef.current) {
+      return null;
+    }
+
+    billingHeartbeatInFlightRef.current = true;
+    try {
+      const response = await fetch("/api/billing/session/heartbeat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: activeToken, session_id: sessionId }),
+        cache: "no-store",
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        active?: boolean;
+        expired?: boolean;
+        remaining_seconds?: number;
+        remaining_minutes?: number;
+      };
+
+      if (!response.ok || data.active === false || data.expired === true) {
+        await handleTimeExpired();
+        return 0;
       }
 
-      try {
-        const response = await fetch("/api/billing/set-minutes", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: activeToken, minutes }),
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || !data.success) {
-          const errorMessage = data.message || data.error || "Failed to set minutes";
-          console.error("Failed to set minutes:", errorMessage);
-          return false;
-        }
-
-        return true;
-      } catch (error) {
-        console.error("Set minutes error:", error);
-        return false;
+      const seconds =
+        typeof data.remaining_seconds === "number"
+          ? Math.max(0, data.remaining_seconds)
+          : null;
+      const minutes =
+        typeof data.remaining_minutes === "number"
+          ? data.remaining_minutes
+          : seconds === null
+            ? null
+            : Math.ceil(seconds / 60);
+      if (seconds !== null) setSecondsRemaining(seconds);
+      if (minutes !== null) {
+        setMinutesRemaining(minutes);
+        setTotalAllocatedMinutes((previous) =>
+          previous === null || minutes > previous ? minutes : previous,
+        );
       }
-    },
-    [clientToken, queryToken],
-  );
+      if (seconds !== null && seconds <= 0) {
+        await handleTimeExpired();
+        return 0;
+      }
+      return seconds;
+    } finally {
+      billingHeartbeatInFlightRef.current = false;
+    }
+  }, [clientToken, handleTimeExpired, queryToken]);
 
   const fetchMinutesRemaining = useCallback(
     async () => {
@@ -449,6 +525,12 @@ function InteractiveAvatar() {
 
         const data = await response.json();
         const minutes = parseMinutesValue(data);
+        const seconds =
+          typeof data?.remaining_seconds === "number"
+            ? Math.max(0, data.remaining_seconds)
+            : typeof minutes === "number"
+              ? Math.max(0, minutes * 60)
+              : null;
 
         if (typeof minutes === "number") {
           // Display exact value from API
@@ -459,8 +541,9 @@ function InteractiveAvatar() {
             }
             return prev;
           });
+          if (seconds !== null) setSecondsRemaining(seconds);
 
-          if (minutes <= 0) {
+          if (seconds !== null && seconds <= 0) {
             await handleTimeExpired();
           }
         }
@@ -478,24 +561,13 @@ function InteractiveAvatar() {
     stopMinutesPolling();
     minutesPollingRef.current = setInterval(async () => {
       try {
-        // Use current displayed minutes value from ref
-        const currentDisplayedMinutes = minutesRemainingRef.current;
-
-        if (currentDisplayedMinutes !== null && currentDisplayedMinutes > 0) {
-          // Reduce by 1 on server using set_minutes BEFORE fetching
-          const newMinutes = currentDisplayedMinutes - 1;
-          const setSuccess = await setMinutes(newMinutes);
-
-          if (setSuccess) {
-            // Then fetch updated value from server
-            await fetchMinutesRemaining();
-          }
-        }
-      } catch (error) {
-        console.error("Minutes polling loop error:", error);
+        await heartbeatBillingSession();
+      } catch {
+        // A transient heartbeat failure must not manufacture a client-side
+        // balance. The next heartbeat retries against the server ledger.
       }
-    }, 60000); // Poll every 1 minute
-  }, [fetchMinutesRemaining, setMinutes, stopMinutesPolling])
+    }, 15000);
+  }, [heartbeatBillingSession, stopMinutesPolling]);
 
   const verifyBillingToken = useCallback(async () => {
     const activeToken = tokenRef.current ?? clientToken ?? queryToken;
@@ -553,7 +625,6 @@ function InteractiveAvatar() {
         return false;
       }
 
-      console.log("✅ Token verified successfully:", activeToken);
       tokenRef.current = activeToken;
       return true;
     } catch (error) {
@@ -574,6 +645,12 @@ function InteractiveAvatar() {
       setTokenError(null);
       setTimeExpired(false);
       hasExpiredRef.current = false;
+
+      // Finish a previous ledger row before opening a new one (for example
+      // after microphone recovery). The server remains the source of truth.
+      await endBillingSession();
+      billingSessionIdRef.current = null;
+      clientSessionIdRef.current = createClientSessionId();
 
       // Step 1: Verify token
       const tokenIsValid = await verifyBillingToken();
@@ -702,6 +779,7 @@ function InteractiveAvatar() {
       }
     } catch (error) {
       console.error("Error starting avatar session:", error);
+      await endBillingSession();
     } finally {
       setIsStarting(false);
     }
@@ -709,7 +787,8 @@ function InteractiveAvatar() {
 
   useUnmount(() => {
     stopMinutesPolling();
-    stopAvatar();
+    void endBillingSession();
+    void stopAvatar();
   });
 
   useEffect(() => {
@@ -834,46 +913,28 @@ function InteractiveAvatar() {
     minutesRemainingRef.current = minutesRemaining;
   }, [minutesRemaining]);
 
-  // Start seconds countdown when 1 minute is left
+  // The displayed seconds are supplied by the server heartbeat. Never
+  // manufacture a lower balance in the browser.
   useEffect(() => {
-    // Clear any existing countdown
     if (secondsCountdownRef.current) {
       clearInterval(secondsCountdownRef.current);
       secondsCountdownRef.current = null;
     }
-
-    // Start countdown when exactly 1 minute is remaining
-    if (minutesRemaining === 1 && sessionState === StreamingAvatarSessionState.CONNECTED) {
-      setSecondsRemaining(60); // Start at 60 seconds
-
-      secondsCountdownRef.current = setInterval(() => {
-        setSecondsRemaining((prev) => {
-          if (prev === null || prev <= 1) {
-            if (secondsCountdownRef.current) {
-              clearInterval(secondsCountdownRef.current);
-              secondsCountdownRef.current = null;
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000); // Update every second
-    } else if (minutesRemaining !== 1) {
-      // Reset seconds when not at 1 minute
+    if (sessionState !== StreamingAvatarSessionState.CONNECTED) {
       setSecondsRemaining(null);
     }
 
-    // Cleanup on unmount or when session ends
     return () => {
       if (secondsCountdownRef.current) {
         clearInterval(secondsCountdownRef.current);
         secondsCountdownRef.current = null;
       }
     };
-  }, [minutesRemaining, sessionState]);
+  }, [sessionState]);
 
   useEffect(() => {
     if (sessionState !== StreamingAvatarSessionState.CONNECTED) {
+      void endBillingSession();
       stopMinutesPolling();
       setMinutesRemaining(null);
       setSecondsRemaining(null);
